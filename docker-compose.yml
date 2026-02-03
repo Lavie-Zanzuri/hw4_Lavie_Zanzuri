@@ -1,0 +1,87 @@
+services:
+  # MongoDB for pet-store services (shared by both stores)
+  mongodb-store:
+    image: mongo:7.0
+    container_name: mongodb-store
+    ports:
+      - "27017:27017"
+    networks:
+      - pet_store_network
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # MongoDB for pet-order service (separate instance)
+  mongodb-order:
+    image: mongo:7.0
+    container_name: mongodb-order
+    ports:
+      - "27018:27017"
+    networks:
+      - pet_store_network
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Pet Store Service 1 - host port 5001
+  pet-store1:
+    build: ./pet-store
+    container_name: pet-store1
+    ports:
+      - "5001:5001"
+    environment:
+      - STORE_ID=1
+      - MONGO_HOST=mongodb-store
+      - MONGO_PORT=27017
+      - NINJA_API_KEY=${NINJA_API_KEY}
+    depends_on:
+      mongodb-store:
+        condition: service_healthy
+    networks:
+      - pet_store_network
+
+  # Pet Store Service 2 - host port 5002
+  pet-store2:
+    build: ./pet-store
+    container_name: pet-store2
+    ports:
+      - "5002:5001"
+    environment:
+      - STORE_ID=2
+      - MONGO_HOST=mongodb-store
+      - MONGO_PORT=27017
+      - NINJA_API_KEY=${NINJA_API_KEY}
+    depends_on:
+      mongodb-store:
+        condition: service_healthy
+    networks:
+      - pet_store_network
+
+  # Pet Order Service - host port 5003
+  pet-order:
+    build: ./pet-order
+    container_name: pet-order
+    ports:
+      - "5003:5003"
+    environment:
+      - MONGO_HOST=mongodb-order
+      - MONGO_PORT=27017
+      - PET_STORE1_URL=http://pet-store1:5001
+      - PET_STORE2_URL=http://pet-store2:5001
+    depends_on:
+      mongodb-order:
+        condition: service_healthy
+      pet-store1:
+        condition: service_started
+      pet-store2:
+        condition: service_started
+    networks:
+      - pet_store_network
+
+networks:
+  pet_store_network:
+    driver: bridge

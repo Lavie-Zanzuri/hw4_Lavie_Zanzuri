@@ -1,0 +1,560 @@
+name: assignment4
+
+on:
+  push:
+    branches:
+      - main
+      - master
+
+env:
+  NINJA_API_KEY: ${{ secrets.NINJA_API_KEY }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      pet_store_built: ${{ steps.build_pet_store.outputs.success }}
+      pet_order_built: ${{ steps.build_pet_order.outputs.success }}
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Record start time and initialize log
+        run: |
+          echo "$(date -Iminutes)" > log.txt
+          echo "Lavie Zanzuri" >> log.txt
+
+      - name: Build pet-store image
+        id: build_pet_store
+        run: |
+          if docker build -t pet-store:latest ./pet-store; then
+            echo "success=true" >> $GITHUB_OUTPUT
+            echo "image pet-store successfully built;" >> log.txt
+          else
+            echo "success=false" >> $GITHUB_OUTPUT
+            echo "image pet-store not able to be built;" >> log.txt
+          fi
+
+      - name: Build pet-order image
+        id: build_pet_order
+        run: |
+          if docker build -t pet-order:latest ./pet-order; then
+            echo "success=true" >> $GITHUB_OUTPUT
+            echo "image pet-order successfully built;" >> log.txt
+          else
+            echo "success=false" >> $GITHUB_OUTPUT
+            echo "image pet-order not able to be built;" >> log.txt
+          fi
+
+      - name: Save Docker images
+        run: |
+          docker save pet-store:latest -o pet-store-image.tar
+          docker save pet-order:latest -o pet-order-image.tar
+
+      - name: Upload pet-store image as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pet-store-image
+          path: pet-store-image.tar
+          retention-days: 1
+
+      - name: Upload pet-order image as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pet-order-image
+          path: pet-order-image.tar
+          retention-days: 1
+
+      - name: Upload log file
+        uses: actions/upload-artifact@v4
+        with:
+          name: log-build
+          path: log.txt
+          retention-days: 1
+
+      - name: Check build results
+        run: |
+          if [ "${{ steps.build_pet_store.outputs.success }}" != "true" ] || [ "${{ steps.build_pet_order.outputs.success }}" != "true" ]; then
+            echo "One or more builds failed"
+            exit 1
+          fi
+
+  test:
+    runs-on: ubuntu-latest
+    needs: build
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download log from build job
+        uses: actions/download-artifact@v4
+        with:
+          name: log-build
+
+      - name: Download pet-store image
+        uses: actions/download-artifact@v4
+        with:
+          name: pet-store-image
+
+      - name: Download pet-order image
+        uses: actions/download-artifact@v4
+        with:
+          name: pet-order-image
+
+      - name: Load Docker images
+        run: |
+          docker load -i pet-store-image.tar
+          docker load -i pet-order-image.tar
+
+      - name: Create Docker network
+        run: docker network create pet_store_network
+
+      - name: Start MongoDB for pet-stores
+        run: |
+          docker run -d --name mongodb-store \
+            --network pet_store_network \
+            -p 27017:27017 \
+            mongo:7.0
+
+      - name: Start MongoDB for pet-order
+        run: |
+          docker run -d --name mongodb-order \
+            --network pet_store_network \
+            -p 27018:27017 \
+            mongo:7.0
+
+      - name: Wait for MongoDB to be ready
+        run: |
+          echo "Waiting for MongoDB instances to be ready..."
+          sleep 10
+
+      - name: Start pet-store1 container
+        id: start_pet_store1
+        run: |
+          if docker run -d --name pet-store1 \
+            --network pet_store_network \
+            -p 5001:5001 \
+            -e STORE_ID=1 \
+            -e MONGO_HOST=mongodb-store \
+            -e MONGO_PORT=27017 \
+            -e NINJA_API_KEY=${{ secrets.NINJA_API_KEY }} \
+            pet-store:latest; then
+            echo "success=true" >> $GITHUB_OUTPUT
+          else
+            echo "success=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Start pet-store2 container
+        id: start_pet_store2
+        run: |
+          if docker run -d --name pet-store2 \
+            --network pet_store_network \
+            -p 5002:5001 \
+            -e STORE_ID=2 \
+            -e MONGO_HOST=mongodb-store \
+            -e MONGO_PORT=27017 \
+            -e NINJA_API_KEY=${{ secrets.NINJA_API_KEY }} \
+            pet-store:latest; then
+            echo "success=true" >> $GITHUB_OUTPUT
+          else
+            echo "success=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Start pet-order container
+        id: start_pet_order
+        run: |
+          if docker run -d --name pet-order \
+            --network pet_store_network \
+            -p 5003:5003 \
+            -e MONGO_HOST=mongodb-order \
+            -e MONGO_PORT=27017 \
+            -e PET_STORE1_URL=http://pet-store1:5001 \
+            -e PET_STORE2_URL=http://pet-store2:5001 \
+            pet-order:latest; then
+            echo "success=true" >> $GITHUB_OUTPUT
+          else
+            echo "success=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Update log with container status
+        run: |
+          # Check pet-store1
+          if [ "${{ steps.start_pet_store1.outputs.success }}" == "true" ] && docker ps | grep -q pet-store1; then
+            echo "Container pet-store #1 up and running;" >> log.txt
+          else
+            echo "Container pet-store #1 failed to run;" >> log.txt
+          fi
+          
+          # Check pet-store2
+          if [ "${{ steps.start_pet_store2.outputs.success }}" == "true" ] && docker ps | grep -q pet-store2; then
+            echo "Container pet-store #2 up and running;" >> log.txt
+          else
+            echo "Container pet-store #2 failed to run;" >> log.txt
+          fi
+          
+          # Check pet-order
+          if [ "${{ steps.start_pet_order.outputs.success }}" == "true" ] && docker ps | grep -q pet-order; then
+            echo "Container pet-order up and running;" >> log.txt
+          else
+            echo "Container pet-order failed to run;" >> log.txt
+          fi
+
+      - name: Wait for services to be ready
+        run: |
+          echo "Waiting for services to start..."
+          sleep 10
+          
+          # Check if services are responding
+          for i in {1..30}; do
+            if curl -s http://localhost:5001/pet-types > /dev/null 2>&1; then
+              echo "pet-store1 is ready"
+              break
+            fi
+            echo "Waiting for pet-store1... attempt $i"
+            sleep 2
+          done
+          
+          for i in {1..30}; do
+            if curl -s http://localhost:5002/pet-types > /dev/null 2>&1; then
+              echo "pet-store2 is ready"
+              break
+            fi
+            echo "Waiting for pet-store2... attempt $i"
+            sleep 2
+          done
+          
+          for i in {1..30}; do
+            if curl -s http://localhost:5003/purchases > /dev/null 2>&1 || curl -s -o /dev/null -w "%{http_code}" http://localhost:5003/purchases 2>&1 | grep -q "4"; then
+              echo "pet-order is ready"
+              break
+            fi
+            echo "Waiting for pet-order... attempt $i"
+            sleep 2
+          done
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install pytest and requests
+        run: |
+          pip install pytest requests
+
+      - name: Run pytest
+        id: run_tests
+        run: |
+          cd tests
+          if pytest -v assn4_tests.py > ../assn4_test_results.txt 2>&1; then
+            echo "success=true" >> $GITHUB_OUTPUT
+            echo "All pytests succeeded" >> ../log.txt
+          else
+            echo "success=false" >> $GITHUB_OUTPUT
+            echo "pytests failed" >> ../log.txt
+          fi
+        continue-on-error: true
+
+      - name: Upload test results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: assn4_test_results
+          path: assn4_test_results.txt
+          retention-days: 5
+
+      - name: Upload log file
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: log
+          path: log.txt
+          retention-days: 5
+
+      - name: Show container logs on failure
+        if: failure()
+        run: |
+          echo "=== pet-store1 logs ==="
+          docker logs pet-store1 || true
+          echo "=== pet-store2 logs ==="
+          docker logs pet-store2 || true
+          echo "=== pet-order logs ==="
+          docker logs pet-order || true
+
+      - name: Fail if tests failed
+        if: steps.run_tests.outputs.success != 'true'
+        run: exit 1
+
+  query:
+    runs-on: ubuntu-latest
+    needs: test
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download pet-store image
+        uses: actions/download-artifact@v4
+        with:
+          name: pet-store-image
+
+      - name: Download pet-order image
+        uses: actions/download-artifact@v4
+        with:
+          name: pet-order-image
+
+      - name: Load Docker images
+        run: |
+          docker load -i pet-store-image.tar
+          docker load -i pet-order-image.tar
+
+      - name: Create Docker network
+        run: docker network create pet_store_network
+
+      - name: Start MongoDB for pet-stores
+        run: |
+          docker run -d --name mongodb-store \
+            --network pet_store_network \
+            -p 27017:27017 \
+            mongo:7.0
+
+      - name: Start MongoDB for pet-order
+        run: |
+          docker run -d --name mongodb-order \
+            --network pet_store_network \
+            -p 27018:27017 \
+            mongo:7.0
+
+      - name: Wait for MongoDB to be ready
+        run: sleep 10
+
+      - name: Start pet-store1 container
+        run: |
+          docker run -d --name pet-store1 \
+            --network pet_store_network \
+            -p 5001:5001 \
+            -e STORE_ID=1 \
+            -e MONGO_HOST=mongodb-store \
+            -e MONGO_PORT=27017 \
+            -e NINJA_API_KEY=${{ secrets.NINJA_API_KEY }} \
+            pet-store:latest
+
+      - name: Start pet-store2 container
+        run: |
+          docker run -d --name pet-store2 \
+            --network pet_store_network \
+            -p 5002:5001 \
+            -e STORE_ID=2 \
+            -e MONGO_HOST=mongodb-store \
+            -e MONGO_PORT=27017 \
+            -e NINJA_API_KEY=${{ secrets.NINJA_API_KEY }} \
+            pet-store:latest
+
+      - name: Start pet-order container
+        run: |
+          docker run -d --name pet-order \
+            --network pet_store_network \
+            -p 5003:5003 \
+            -e MONGO_HOST=mongodb-order \
+            -e MONGO_PORT=27017 \
+            -e PET_STORE1_URL=http://pet-store1:5001 \
+            -e PET_STORE2_URL=http://pet-store2:5001 \
+            pet-order:latest
+
+      - name: Wait for services to be ready
+        run: |
+          echo "Waiting for services to start..."
+          sleep 10
+          
+          for i in {1..30}; do
+            if curl -s http://localhost:5001/pet-types > /dev/null 2>&1; then
+              echo "pet-store1 is ready"
+              break
+            fi
+            sleep 2
+          done
+          
+          for i in {1..30}; do
+            if curl -s http://localhost:5002/pet-types > /dev/null 2>&1; then
+              echo "pet-store2 is ready"
+              break
+            fi
+            sleep 2
+          done
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install requests
+        run: pip install requests
+
+      - name: Populate data (POST pet-types and pets)
+        run: |
+          python3 << 'EOF'
+          import requests
+          import time
+          
+          STORE1_URL = "http://localhost:5001"
+          STORE2_URL = "http://localhost:5002"
+          
+          # Pet types payloads
+          PET_TYPE1 = {"type": "Golden Retriever"}
+          PET_TYPE2 = {"type": "Australian Shepherd"}
+          PET_TYPE3 = {"type": "Abyssinian"}
+          PET_TYPE4 = {"type": "bulldog"}
+          
+          # Pets payloads
+          PET1_TYPE1 = {"name": "Lander", "birthdate": "14-05-2020"}
+          PET2_TYPE1 = {"name": "Lanky"}
+          PET3_TYPE1 = {"name": "Shelly", "birthdate": "07-07-2019"}
+          PET4_TYPE2 = {"name": "Felicity", "birthdate": "27-11-2011"}
+          PET5_TYPE3 = {"name": "Muscles"}
+          PET6_TYPE3 = {"name": "Junior"}
+          PET7_TYPE4 = {"name": "Lazy", "birthdate": "07-08-2018"}
+          PET8_TYPE4 = {"name": "Lemon", "birthdate": "27-03-2020"}
+          
+          headers = {"Content-Type": "application/json"}
+          
+          # POST pet-types to store 1
+          r1 = requests.post(f"{STORE1_URL}/pet-types", json=PET_TYPE1, headers=headers)
+          r2 = requests.post(f"{STORE1_URL}/pet-types", json=PET_TYPE2, headers=headers)
+          r3 = requests.post(f"{STORE1_URL}/pet-types", json=PET_TYPE3, headers=headers)
+          
+          id_1 = r1.json().get('id')
+          id_2 = r2.json().get('id')
+          id_3 = r3.json().get('id')
+          
+          print(f"Store 1 - id_1: {id_1}, id_2: {id_2}, id_3: {id_3}")
+          
+          # POST pet-types to store 2
+          r4 = requests.post(f"{STORE2_URL}/pet-types", json=PET_TYPE1, headers=headers)
+          r5 = requests.post(f"{STORE2_URL}/pet-types", json=PET_TYPE2, headers=headers)
+          r6 = requests.post(f"{STORE2_URL}/pet-types", json=PET_TYPE4, headers=headers)
+          
+          id_4 = r4.json().get('id')
+          id_5 = r5.json().get('id')
+          id_6 = r6.json().get('id')
+          
+          print(f"Store 2 - id_4: {id_4}, id_5: {id_5}, id_6: {id_6}")
+          
+          # POST pets to store 1
+          requests.post(f"{STORE1_URL}/pet-types/{id_1}/pets", json=PET1_TYPE1, headers=headers)
+          requests.post(f"{STORE1_URL}/pet-types/{id_1}/pets", json=PET2_TYPE1, headers=headers)
+          requests.post(f"{STORE1_URL}/pet-types/{id_3}/pets", json=PET5_TYPE3, headers=headers)
+          requests.post(f"{STORE1_URL}/pet-types/{id_3}/pets", json=PET6_TYPE3, headers=headers)
+          
+          # POST pets to store 2
+          requests.post(f"{STORE2_URL}/pet-types/{id_4}/pets", json=PET3_TYPE1, headers=headers)
+          requests.post(f"{STORE2_URL}/pet-types/{id_5}/pets", json=PET4_TYPE2, headers=headers)
+          requests.post(f"{STORE2_URL}/pet-types/{id_6}/pets", json=PET7_TYPE4, headers=headers)
+          requests.post(f"{STORE2_URL}/pet-types/{id_6}/pets", json=PET8_TYPE4, headers=headers)
+          
+          print("Data population completed")
+          EOF
+
+      - name: Process query.txt and generate response.txt
+        run: |
+          python3 << 'EOF'
+          import requests
+          import json
+          import re
+          
+          STORE1_URL = "http://localhost:5001"
+          STORE2_URL = "http://localhost:5002"
+          ORDER_URL = "http://localhost:5003"
+          
+          def get_store_url(store_num):
+              return STORE1_URL if store_num == "1" else STORE2_URL
+          
+          # Read query.txt
+          try:
+              with open('query.txt', 'r') as f:
+                  content = f.read()
+          except FileNotFoundError:
+              print("query.txt not found, creating empty response.txt")
+              with open('response.txt', 'w') as f:
+                  pass
+              exit(0)
+          
+          # Parse entries (split by semicolon)
+          entries = [e.strip() for e in content.split(';') if e.strip()]
+          
+          responses = []
+          
+          for entry in entries:
+              if entry.startswith('query:'):
+                  # Parse query: <store-num>,<query-string>
+                  match = re.match(r'query:\s*(\d),(.+)', entry)
+                  if match:
+                      store_num = match.group(1)
+                      query_string = match.group(2).strip()
+                      
+                      store_url = get_store_url(store_num)
+                      url = f"{store_url}/pet-types?{query_string}"
+                      
+                      try:
+                          response = requests.get(url)
+                          status_code = response.status_code
+                          
+                          if status_code == 200:
+                              payload = json.dumps(response.json(), indent=2)
+                          else:
+                              payload = "NONE"
+                      except Exception as e:
+                          status_code = 500
+                          payload = "NONE"
+                      
+                      responses.append(f"{status_code}\n{payload}")
+              
+              elif entry.startswith('purchase:'):
+                  # Parse purchase: <JSON-purchase>
+                  match = re.match(r'purchase:\s*(.+)', entry)
+                  if match:
+                      json_str = match.group(1).strip()
+                      
+                      try:
+                          purchase_data = json.loads(json_str)
+                          response = requests.post(
+                              f"{ORDER_URL}/purchases",
+                              json=purchase_data,
+                              headers={"Content-Type": "application/json"}
+                          )
+                          status_code = response.status_code
+                          
+                          if status_code == 201:
+                              payload = json.dumps(response.json(), indent=2)
+                          else:
+                              payload = "NONE"
+                      except Exception as e:
+                          status_code = 400
+                          payload = "NONE"
+                      
+                      responses.append(f"{status_code}\n{payload}")
+          
+          # Write response.txt
+          with open('response.txt', 'w') as f:
+              for resp in responses:
+                  f.write(resp + "\n;\n")
+          
+          print("response.txt generated successfully")
+          EOF
+
+      - name: Upload response.txt
+        uses: actions/upload-artifact@v4
+        with:
+          name: response
+          path: response.txt
+          retention-days: 5
+
+      - name: Show container logs on failure
+        if: failure()
+        run: |
+          echo "=== pet-store1 logs ==="
+          docker logs pet-store1 || true
+          echo "=== pet-store2 logs ==="
+          docker logs pet-store2 || true
+          echo "=== pet-order logs ==="
+          docker logs pet-order || true
