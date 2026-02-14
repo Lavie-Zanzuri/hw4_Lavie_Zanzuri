@@ -245,8 +245,8 @@ class TestPetStoreAPI:
         id_6 = store2_ids['id_6']
         
         response = requests.get(f"{STORE2_URL}/pet-types/{id_6}/pets")
-        # assert response.status_code == 200, f"Expected 200, got {response.status_code}"
-        assert response.status_code == 404, f"Expected 200, got {response.status_code}"
+        assert response.status_code == 200, f"Expected 200, got {response.status_code}"
+        # assert response.status_code == 404, f"Expected 200, got {response.status_code}"
         
         pets = response.json()
         assert isinstance(pets, list), "Response should be a list"
